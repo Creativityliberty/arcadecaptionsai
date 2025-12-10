@@ -1,0 +1,8 @@
+{
+  "name": "ArcadeCaptions AI",
+  "description": "Create Street Fighter style animated video captions powered by your voice and emotions.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
