@@ -47,6 +47,20 @@
         50% { opacity: 1.0; }
         100% { opacity: 0.9; }
       }
+      
+      /* New Animations for VFX */
+      @keyframes shake {
+        0%, 100% { transform: translate(0, 0) rotate(0deg); }
+        25% { transform: translate(-2px, 2px) rotate(-2deg); }
+        50% { transform: translate(2px, -2px) rotate(2deg); }
+        75% { transform: translate(-2px, -2px) rotate(-2deg); }
+      }
+      
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px) scale(0.9); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+
       /* Custom scrollbar */
       ::-webkit-scrollbar {
         width: 8px;

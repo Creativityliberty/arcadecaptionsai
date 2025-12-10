@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { ArrowLeft, Mic, Square, Upload, Zap } from 'lucide-react';
-import { ProcessingResult } from '../types';
+import { ProcessingResult, Emotion } from '../types';
 import { generateSubtitlesFromAudio } from '../services/geminiService';
 import { FIGHTER_STYLES } from '../constants';
 
@@ -20,8 +20,9 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
   const [chunks, setChunks] = useState<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
 
-  // Audio Visualization State
+  // Audio Visualization & Emotion Simulation
   const [audioVolume, setAudioVolume] = useState(0);
+  const [simulatedEmotion, setSimulatedEmotion] = useState<Emotion>('neutral');
   const animationFrameRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -62,9 +63,14 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
             sum += dataArray[i];
           }
           const average = sum / dataArray.length;
-          // Normalize to 0-1 range roughly
-          const normalized = Math.min(1, average / 100); 
+          // Normalize roughly 0-1
+          const normalized = Math.min(1, average / 80); 
           setAudioVolume(normalized);
+
+          // Simulate Emotion based on Volume
+          if (normalized > 0.6) setSimulatedEmotion('anger');
+          else if (normalized > 0.3) setSimulatedEmotion('joy');
+          else setSimulatedEmotion('neutral');
           
           animationFrameRef.current = requestAnimationFrame(updateVolume);
         };
@@ -166,10 +172,20 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
     );
   }
 
-  // Calculate dynamic visual properties based on volume
-  const scale = 1 + (audioVolume * 0.5); // Scale between 1 and 1.5
-  const opacity = 0.3 + (audioVolume * 0.7); // Opacity between 0.3 and 1
-  const previewText = audioVolume > 0.3 ? "HYPE!" : "READY?";
+  // Visual Helper Functions
+  const getPreviewText = () => {
+    if (audioVolume < 0.1) return "READY?";
+    if (simulatedEmotion === 'anger') return "LOUD!!";
+    if (simulatedEmotion === 'joy') return "HYPE!";
+    return "SPEAK";
+  };
+
+  const getPreviewAnimationClass = () => {
+    if (audioVolume < 0.1) return 'animate-pulse opacity-50';
+    if (simulatedEmotion === 'anger') return 'animate-[shake_0.1s_infinite] text-red-500 scale-110 drop-shadow-[0_0_10px_rgba(255,0,0,0.8)]';
+    if (simulatedEmotion === 'joy') return 'animate-bounce text-yellow-400 scale-105';
+    return 'text-white';
+  };
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-900 relative">
@@ -210,27 +226,39 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                 <div 
                     className={`
-                        transition-all duration-75 ease-out
+                        transition-all duration-100 ease-out
                         ${styleConfig.fontClass}
-                        ${styleConfig.color}
                         text-center
+                        ${getPreviewAnimationClass()}
                     `}
                     style={{
-                        transform: `scale(${scale})`,
-                        opacity: opacity,
-                        textShadow: audioVolume > 0.3 ? '0 0 20px currentColor' : 'none'
+                        fontSize: `${4 + (audioVolume * 4)}rem`,
                     }}
                 >
-                    <div className="text-6xl md:text-8xl">{previewText}</div>
-                    <div className="text-sm font-sans tracking-widest mt-2 text-white">MIC CHECK</div>
+                    <div>{getPreviewText()}</div>
+                    <div className="text-sm font-sans tracking-widest mt-2 text-white opacity-70">MIC CHECK</div>
                 </div>
+            </div>
+        )}
+
+        {/* Recording Overlay */}
+        {isRecording && (
+            <div className="absolute inset-x-0 bottom-1/3 flex justify-center pointer-events-none">
+                 <div className={`
+                    ${styleConfig.fontClass} 
+                    text-4xl text-white drop-shadow-[0_2px_0_#000]
+                    transition-all duration-75
+                    ${getPreviewAnimationClass()}
+                 `}>
+                    {simulatedEmotion === 'anger' ? "*SHAKE*" : simulatedEmotion === 'joy' ? "*BOUNCE*" : "..."}
+                 </div>
             </div>
         )}
         
         {/* Power Level Bar (Real Viz) */}
         <div className="absolute right-4 top-1/4 bottom-1/4 w-4 bg-slate-800 border border-slate-600 rounded-full overflow-hidden flex flex-col justify-end z-20">
             <div 
-                className={`w-full bg-gradient-to-t from-yellow-500 to-red-600 transition-all duration-75`}
+                className={`w-full transition-all duration-75 ${simulatedEmotion === 'anger' ? 'bg-red-600' : simulatedEmotion === 'joy' ? 'bg-yellow-400' : 'bg-blue-500'}`}
                 style={{ height: `${Math.min(100, audioVolume * 100 * 1.5)}%` }}
             ></div>
         </div>
