@@ -1,3 +1,4 @@
+
 import React, { useRef, useState, useEffect } from 'react';
 import { Play, RotateCcw, Download, Home, Wand2, Type, Loader2, Pause } from 'lucide-react';
 import { SubtitleSegment, AppState, VideoFilter, FontSize } from '../types';
@@ -68,6 +69,13 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
   const handleExport = async () => {
     if (!appState.recordedBlob) return;
     
+    // 1. Wait for fonts to be ready (CRITICAL for canvas text)
+    try {
+        await document.fonts.ready;
+    } catch (e) {
+        console.warn("Fonts might not be fully loaded", e);
+    }
+
     const mimeType = getSupportedMimeType();
     if (!mimeType) {
         alert("Your browser does not support video recording export.");
@@ -76,44 +84,70 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
 
     setIsRendering(true);
     setRenderProgress(0);
+    
+    // Cleanup variables
+    let offlineVideo: HTMLVideoElement | null = null;
+    let audioCtx: AudioContext | null = null;
+    let mediaRecorder: MediaRecorder | null = null;
+    let stream: MediaStream | null = null;
 
     try {
-      // 1. Setup offline video element
-      const offlineVideo = document.createElement('video');
-      offlineVideo.src = URL.createObjectURL(appState.recordedBlob);
-      offlineVideo.muted = true;
-      offlineVideo.playsInline = true;
+      // 2. Setup offline video element attached to DOM (hidden)
+      // This is required for Chrome/Edge to process audio/video correctly
+      offlineVideo = document.createElement('video');
+      offlineVideo.style.position = 'fixed';
+      offlineVideo.style.top = '0';
+      offlineVideo.style.left = '0';
+      offlineVideo.style.width = '1px';
+      offlineVideo.style.height = '1px';
+      offlineVideo.style.opacity = '0.01'; // Not 0 to ensure browser renders it
+      offlineVideo.style.pointerEvents = 'none';
+      offlineVideo.style.zIndex = '-1';
+      document.body.appendChild(offlineVideo);
+
       offlineVideo.crossOrigin = "anonymous";
+      offlineVideo.src = URL.createObjectURL(appState.recordedBlob);
+      offlineVideo.muted = false; // Important: Unmuted to capture audio track
+      offlineVideo.volume = 1.0;
+      offlineVideo.playsInline = true;
       
       await new Promise((resolve, reject) => {
-        offlineVideo.onloadeddata = resolve;
+        if (!offlineVideo) return reject("No video");
+        offlineVideo.onloadeddata = () => resolve(true);
         offlineVideo.onerror = reject;
       });
 
-      // 2. Setup Canvas
+      // 3. Setup Canvas
       const canvas = document.createElement('canvas');
-      const width = offlineVideo.videoWidth;
-      const height = offlineVideo.videoHeight;
+      const width = offlineVideo.videoWidth || 1280;
+      const height = offlineVideo.videoHeight || 720;
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d', { alpha: false });
+      const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
       if (!ctx) throw new Error("Could not get canvas context");
 
-      // 3. Setup Recorder
-      const stream = canvas.captureStream(30); // 30 FPS target
-      
-      // Mix Audio
-      const audioCtx = new AudioContext();
-      const audioSource = audioCtx.createMediaElementSource(offlineVideo);
+      // 4. Setup Audio Mixing
+      // We use AudioContext to mix the video audio into the stream
+      audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const dest = audioCtx.createMediaStreamDestination();
-      audioSource.connect(dest);
-      
-      const tracks = [...stream.getVideoTracks(), ...dest.stream.getAudioTracks()];
-      const combinedStream = new MediaStream(tracks);
+      const source = audioCtx.createMediaElementSource(offlineVideo);
+      source.connect(dest);
+      // Connect to speakers momentarily to ensure flow, but gain 0 to avoid echo if needed
+      // source.connect(audioCtx.destination); 
 
-      const mediaRecorder = new MediaRecorder(combinedStream, {
+      // 5. Create the Stream
+      // '0' means we manually drive frames via requestFrame, reducing dropped frames
+      const canvasStream = canvas.captureStream(0); 
+      const audioTrack = dest.stream.getAudioTracks()[0];
+      
+      const combinedTracks = [...canvasStream.getVideoTracks()];
+      if (audioTrack) combinedTracks.push(audioTrack);
+      
+      stream = new MediaStream(combinedTracks);
+
+      mediaRecorder = new MediaRecorder(stream, {
         mimeType: mimeType,
-        videoBitsPerSecond: 5000000 // 5 Mbps for good quality
+        videoBitsPerSecond: 8000000 // 8 Mbps for high quality
       });
       
       const chunks: Blob[] = [];
@@ -126,7 +160,6 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        // Determine extension
         const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
         a.download = `arcade_fighter_${Date.now()}.${ext}`;
         document.body.appendChild(a);
@@ -134,51 +167,74 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
         
+        // Cleanup
         setIsRendering(false);
         setRenderProgress(0);
-        audioCtx.close();
+        if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
+        if (offlineVideo && document.body.contains(offlineVideo)) {
+          document.body.removeChild(offlineVideo);
+        }
+        if (stream) stream.getTracks().forEach(t => t.stop());
       };
 
       mediaRecorder.start();
 
-      // 4. Render Loop
+      // 6. Start Playback & Resume Audio
+      if (audioCtx.state === 'suspended') {
+          await audioCtx.resume();
+      }
       offlineVideo.currentTime = 0;
       await offlineVideo.play();
 
+      // 7. Render Loop
       const drawFrame = () => {
+        if (!offlineVideo || !ctx || !mediaRecorder) return;
+
         if (offlineVideo.ended || offlineVideo.paused) {
-          if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+          if (mediaRecorder.state !== 'inactive') {
+             mediaRecorder.stop();
+          }
           return;
         }
 
-        // --- A. Draw Video Base ---
-        // Apply filter via context filter
+        // --- A. Draw Background (Clear) ---
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, width, height);
+
+        // --- B. Draw Video Base ---
         ctx.filter = getCanvasFilter(activeFilter);
         
-        // ANGER VFX: Glitch/Shake the video frame itself
         const currentTime = offlineVideo.currentTime;
         const activeSub = appState.subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
         
+        // VFX: Camera Shake
         let dx = 0;
         let dy = 0;
-        
         if (activeSub?.emotion === 'anger') {
-            dx = (Math.random() - 0.5) * 40;
-            dy = (Math.random() - 0.5) * 40;
-            // Occasional color split or slice could be done here but simple shake is safer for performance
+            const intensity = 30; 
+            dx = (Math.random() - 0.5) * intensity;
+            dy = (Math.random() - 0.5) * intensity;
         }
 
         ctx.drawImage(offlineVideo, dx, dy, width, height);
         ctx.filter = 'none';
 
-        // --- B. Draw VFX Behind Text ---
+        // --- C. Draw VFX & Text ---
         if (activeSub) {
             drawCanvasVFX(ctx, width, height, activeSub.emotion, currentTime);
             drawCanvasSubtitle(ctx, width, height, activeSub, styleConfig, fontSize, currentTime);
         }
 
+        // Manually trigger a frame capture for the recorder
+        // (This works with captureStream(0))
+        const videoTrack = canvasStream.getVideoTracks()[0];
+        if (videoTrack && (videoTrack as any).requestFrame) {
+            (videoTrack as any).requestFrame();
+        }
+
         setRenderProgress(Math.floor((currentTime / offlineVideo.duration) * 100));
         
+        // Loop using Video Frame Callback for sync, or fallback to rAF
         if ('requestVideoFrameCallback' in offlineVideo) {
           (offlineVideo as any).requestVideoFrameCallback(drawFrame);
         } else {
@@ -191,7 +247,13 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     } catch (err) {
       console.error("Export failed", err);
       setIsRendering(false);
-      alert("Export failed. Please try again on a desktop browser like Chrome.");
+      alert("Export failed. Please try again.");
+      
+      // Cleanup on error
+      if (audioCtx) audioCtx.close();
+      if (offlineVideo && document.body.contains(offlineVideo)) {
+          document.body.removeChild(offlineVideo);
+      }
     }
   };
 
@@ -216,37 +278,36 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
   ) => {
      // KAMEHAMEHA (Hype)
      if (emotion === 'hype') {
-        const centerY = h * 0.75; // Behind text area
-        const flicker = Math.sin(time * 30) * 0.5 + 1.5; // Intense flicker
+        const centerY = h * 0.75; 
+        const flicker = Math.sin(time * 30) * 0.5 + 1.5;
         
-        // 1. Main Beam (Gradient)
-        const beamHeight = 200 * flicker;
+        const beamHeight = 250 * flicker;
         const grad = ctx.createLinearGradient(0, centerY, w, centerY);
         grad.addColorStop(0, 'rgba(0, 255, 255, 0)');
-        grad.addColorStop(0.2, 'rgba(50, 150, 255, 0.5)');
-        grad.addColorStop(0.5, 'rgba(200, 255, 255, 0.8)');
-        grad.addColorStop(0.8, 'rgba(50, 150, 255, 0.5)');
+        grad.addColorStop(0.2, 'rgba(50, 150, 255, 0.6)');
+        grad.addColorStop(0.5, 'rgba(200, 255, 255, 0.9)');
+        grad.addColorStop(0.8, 'rgba(50, 150, 255, 0.6)');
         grad.addColorStop(1, 'rgba(0, 255, 255, 0)');
 
-        ctx.globalCompositeOperation = 'screen'; // Additive blending
+        ctx.globalCompositeOperation = 'screen';
         ctx.fillStyle = grad;
         ctx.fillRect(0, centerY - beamHeight/2, w, beamHeight);
 
-        // 2. Core Beam (White hot)
-        const coreHeight = 50 * flicker;
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        const coreHeight = 60 * flicker;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
         ctx.fillRect(0, centerY - coreHeight/2, w, coreHeight);
 
-        // 3. Lightning Particles
+        // Lightning
         ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
         ctx.beginPath();
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 6; i++) {
             const x = Math.random() * w;
             const y = centerY + (Math.random() - 0.5) * beamHeight;
-            const len = 50 + Math.random() * 100;
+            const len = 50 + Math.random() * 150;
             ctx.moveTo(x, y);
-            ctx.lineTo(x + len, y + (Math.random() - 0.5) * 50);
+            ctx.lineTo(x + len, y + (Math.random() - 0.5) * 60);
         }
         ctx.stroke();
         ctx.globalCompositeOperation = 'source-over';
@@ -257,7 +318,7 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
         const pulse = Math.sin(time * 20);
         const grad = ctx.createRadialGradient(w/2, h/2, h*0.4, w/2, h/2, h);
         grad.addColorStop(0, 'rgba(255, 0, 0, 0)');
-        grad.addColorStop(1, `rgba(255, 0, 0, ${0.3 + pulse * 0.1})`);
+        grad.addColorStop(1, `rgba(220, 38, 38, ${0.4 + pulse * 0.2})`);
         
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
@@ -265,18 +326,18 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
 
      // SPARKLES (Joy)
      if (emotion === 'joy') {
-         // Simple confetti simulation based on time
-         const count = 20;
+         const count = 25;
          for (let i = 0; i < count; i++) {
-             // Pseudo-random position based on time + index
-             const x = ((time * 100 + i * 150) % w);
-             const y = ((time * 200 + i * 100) % h);
-             const size = 5 + (i % 3) * 5;
+             const x = ((time * 150 + i * 150) % w);
+             const y = ((time * 250 + i * 100) % h);
+             const size = 8 + (i % 3) * 5;
              
              ctx.fillStyle = i % 2 === 0 ? '#ffd700' : '#ffffff';
+             ctx.globalAlpha = 0.8;
              ctx.beginPath();
              ctx.arc(x, y, size, 0, Math.PI * 2);
              ctx.fill();
+             ctx.globalAlpha = 1.0;
          }
      }
   };
@@ -290,10 +351,8 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     fSize: FontSize,
     time: number
   ) => {
-    // 1. Scale Font
     let baseSize = fSize === 'small' ? 40 : fSize === 'medium' ? 65 : 90;
-    const scaleFactor = w / 1080; // normalize based on width
-    const fontSizePx = baseSize * (w < h ? w/700 : w/1200); // responsive logic
+    const fontSizePx = baseSize * (w < h ? w/700 : w/1200); 
 
     let fontFamily = 'sans-serif';
     if (style.fontClass.includes('font-arcade')) fontFamily = '"Press Start 2P", cursive';
@@ -305,27 +364,50 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
-    // 2. Animations
+    // Animations
     let offsetX = 0;
     let offsetY = 0;
     let scale = 1;
     let rotation = 0;
 
     if (sub.emotion === 'anger') {
-        offsetX = (Math.random() - 0.5) * 15;
-        offsetY = (Math.random() - 0.5) * 15;
-        rotation = (Math.random() - 0.5) * 0.1;
+        offsetX = (Math.random() - 0.5) * 20;
+        offsetY = (Math.random() - 0.5) * 20;
+        rotation = (Math.random() - 0.5) * 0.15;
     }
     if (sub.emotion === 'joy') {
-        offsetY = Math.sin(time * 8) * 20;
-        rotation = Math.sin(time * 4) * 0.05;
+        offsetY = Math.sin(time * 10) * 30;
+        rotation = Math.sin(time * 5) * 0.08;
     }
     if (sub.emotion === 'hype') {
-        scale = 1 + Math.abs(Math.sin(time * 10)) * 0.15;
+        scale = 1 + Math.abs(Math.sin(time * 12)) * 0.2;
     }
 
-    // 3. Draw
     ctx.save();
+    
+    // Opacity Animation (Fade In / Fade Out)
+    const fadeIn = 0.08; 
+    const fadeOut = 0.15;
+    const delay = 0.05; // slight delay after audio start
+    
+    const elapsed = time - sub.start;
+    const remaining = sub.end - time;
+    let alpha = 1.0;
+
+    // Fade In logic
+    if (elapsed < delay) {
+        alpha = 0;
+    } else if (elapsed < delay + fadeIn) {
+        alpha = (elapsed - delay) / fadeIn;
+    }
+
+    // Fade Out logic
+    if (remaining < fadeOut) {
+        alpha = Math.min(alpha, remaining / fadeOut);
+    }
+    
+    ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+
     ctx.translate(w / 2 + offsetX, h * 0.8 + offsetY); 
     ctx.rotate(rotation);
     ctx.scale(scale, scale);
@@ -333,15 +415,15 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     const text = sub.text.toUpperCase();
     const color = getEmotionHexColor(sub.emotion, style);
 
-    // Dynamic Outline
-    ctx.lineWidth = 12 * scaleFactor;
+    // Stroke
+    ctx.lineWidth = 15 * (w/1080);
     ctx.strokeStyle = '#000000';
     ctx.strokeText(text, 0, 0);
 
-    // Neon Glow for certain styles
+    // Glow
     if (sub.emotion === 'hype' || style.id === 'chun_lightning') {
         ctx.shadowColor = color;
-        ctx.shadowBlur = 30;
+        ctx.shadowBlur = 40;
     }
 
     ctx.fillStyle = color;
@@ -351,9 +433,9 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
   };
 
   const getEmotionHexColor = (emotion: string, style: any) => {
-    if (emotion === 'anger') return '#ef4444'; // Red
-    if (emotion === 'joy') return '#facc15'; // Yellow
-    if (emotion === 'hype') return '#e879f9'; // Fuchsia
+    if (emotion === 'anger') return '#ef4444';
+    if (emotion === 'joy') return '#facc15';
+    if (emotion === 'hype') return '#e879f9';
     if (style.id === 'ryu_classic') return '#60a5fa';
     if (style.id === 'ken_fire') return '#fb923c';
     if (style.id === 'akuma_rage') return '#dc2626';
@@ -361,7 +443,7 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     return '#ffffff';
   };
 
-  // --- DOM RENDER HELPERS ---
+  // --- DOM RENDER HELPERS (PREVIEW) ---
   const currentFilterClass = VIDEO_FILTERS.find(f => f.id === activeFilter)?.class || '';
 
   const getAnimationClass = (emotion: string) => {
@@ -388,7 +470,6 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
     if (currentSubtitle.emotion === 'hype') {
         return (
             <div className="absolute inset-0 pointer-events-none z-10 flex items-center justify-center overflow-hidden">
-                {/* Kamehameha Beam */}
                 <div className="absolute top-[70%] left-[-50%] right-[-50%] h-32 bg-cyan-400/30 blur-2xl animate-pulse transform -rotate-2"></div>
                 <div className="absolute top-[72%] left-[-50%] right-[-50%] h-12 bg-white/60 blur-lg animate-[pulse_0.1s_infinite] transform -rotate-2"></div>
                 <div className="absolute inset-0 bg-fuchsia-500/10 mix-blend-overlay"></div>
@@ -455,7 +536,7 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
                />
              )}
 
-            {/* SUBTITLE OVERLAY (DOM) */}
+            {/* SUBTITLE OVERLAY (DOM PREVIEW) */}
             {currentSubtitle && !isRendering && (
                 <div className="absolute inset-x-4 bottom-[20%] flex items-end justify-center pointer-events-none z-30">
                     <div 
@@ -499,6 +580,9 @@ export const ResultScreen: React.FC<Props> = ({ appState, onRetry, onHome }) => 
                     </div>
                     <p className="text-xs text-slate-500 font-mono uppercase tracking-wider">
                         Burning VFX & Subtitles
+                    </p>
+                    <p className="text-[10px] text-red-500 font-mono mt-4">
+                        Do not close this tab.
                     </p>
                 </div>
             )}

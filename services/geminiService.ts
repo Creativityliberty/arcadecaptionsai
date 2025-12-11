@@ -52,7 +52,7 @@ export const generateSubtitlesFromAudio = async (audioBlob: Blob): Promise<Subti
         parts: [
           {
             inlineData: {
-              mimeType: audioBlob.type || "audio/webm",
+              mimeType: audioBlob.type || "video/webm",
               data: base64Audio
             }
           },
@@ -71,6 +71,12 @@ export const generateSubtitlesFromAudio = async (audioBlob: Blob): Promise<Subti
       config: {
         responseMimeType: "application/json",
         responseSchema: responseSchema,
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+        ],
       }
     });
 
@@ -79,7 +85,15 @@ export const generateSubtitlesFromAudio = async (audioBlob: Blob): Promise<Subti
       return data as SubtitleSegment[];
     }
     
-    throw new Error("No response text from Gemini");
+    console.warn("Gemini returned empty text. Candidates:", response.candidates);
+    
+    // If empty text (likely silent audio or filtered), return empty array
+    // Check finish reason to be sure
+    if (response.candidates && response.candidates[0]?.finishReason === 'STOP') {
+        return [];
+    }
+
+    throw new Error(`No response text from Gemini. FinishReason: ${response.candidates?.[0]?.finishReason}`);
 
   } catch (error) {
     console.error("Gemini API Error:", error);

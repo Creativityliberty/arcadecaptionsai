@@ -187,6 +187,23 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
     return 'text-white';
   };
 
+  const getBorderState = () => {
+    if (isRecording) {
+        return 'border-red-600 shadow-[inset_0_0_30px_#f00] animate-pulse';
+    }
+    
+    // Dynamic reaction to volume/emotion
+    if (simulatedEmotion === 'anger') {
+        return 'border-red-500 shadow-[0_0_30px_rgba(220,38,38,0.8)]';
+    }
+    if (simulatedEmotion === 'joy') {
+        return 'border-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.6)]';
+    }
+    
+    // Default style color with slight glow
+    return `${styleConfig.borderColor} shadow-[0_0_15px_rgba(0,0,0,0.3)]`;
+  };
+
   return (
     <div className="flex flex-col h-full w-full bg-slate-900 relative">
       <div className="absolute top-4 left-4 z-20">
@@ -218,7 +235,15 @@ export const BattleArenaScreen: React.FC<Props> = ({ selectedStyleId, onProcessi
             autoPlay 
             muted 
             playsInline 
-            className={`h-full w-full object-cover max-w-md md:max-w-2xl border-x-4 ${isRecording ? 'border-red-600 shadow-[inset_0_0_20px_#f00]' : 'border-blue-900'}`} 
+            className={`
+                h-full w-full object-cover max-w-md md:max-w-2xl border-x-4 
+                transition-all duration-100 ease-out
+                ${getBorderState()}
+            `} 
+            style={{
+                // Subtle scale kick on volume
+                transform: `scale(${1 + Math.max(0, audioVolume * 0.05)})`
+            }}
         />
         
         {/* Style Preview Overlay (Dynamic Visualizer) */}
